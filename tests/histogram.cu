@@ -81,13 +81,13 @@ __global__ void histogram(unsigned char* image, int* output, int height, int wid
 }
 
 /* scan kernel to generate CDF of histogram */
-__global__ void CDF(int* histogram, int* output) {
+__global__ void CDF(int* histogram, float* output, int height, int width) {
     // shared memory 
-    __shared__ int cdf[HISTOGRAM_LENGTH];
+    __shared__ float cdf[HISTOGRAM_LENGTH];
 
     // load data to shared memory
-    cdf[threadIdx.x] = histogram[threadIdx.x];
-    cdf[blockDim.x + threadIdx.x] = histogram[blockDim.x + threadIdx.x];
+    cdf[threadIdx.x] = (float) histogram[threadIdx.x];
+    cdf[blockDim.x + threadIdx.x] = (float) histogram[blockDim.x + threadIdx.x];
 
     // reduction step
     for (int stride = 1; stride <= blockDim.x; stride *= 2) {
@@ -107,8 +107,8 @@ __global__ void CDF(int* histogram, int* output) {
 
     // write result to output
     __syncthreads();
-    output[threadIdx.x] = cdf[threadIdx.x];
-    output[threadIdx.x + blockDim.x] = cdf[threadIdx.x + blockDim.x];
+    output[threadIdx.x] = cdf[threadIdx.x] / (width * height);
+    output[threadIdx.x + blockDim.x] = cdf[threadIdx.x + blockDim.x] / (width * height);
 }
 
 int main() {
@@ -127,22 +127,22 @@ int main() {
     unsigned char* ucharImageDevice;
     unsigned char* greyscaleDevice;
     int* histogramDevice;
-    int* CDFDevice;
-    int* outputHost;
+    float* CDFDevice;
+    float* outputHost;
 
     // space allocation for intermediate arrays
     cudaMalloc((void**) &imageDevice, sizeof(float) * height * width * channels); 
     cudaMalloc((void**) &ucharImageDevice, sizeof(unsigned char) * height * width * channels);
     cudaMalloc((void**) &greyscaleDevice, sizeof(unsigned char) * height * width);
     cudaMalloc((void**) &histogramDevice, sizeof(int) * HISTOGRAM_LENGTH);
-    cudaMalloc((void**) &CDFDevice, sizeof(int) * HISTOGRAM_LENGTH);
+    cudaMalloc((void**) &CDFDevice, sizeof(float) * HISTOGRAM_LENGTH);
 
     // assign data 
     cudaMemcpy(imageDevice, imageHost, sizeof(float) * height * width * channels, cudaMemcpyHostToDevice);
     cudaMemset(histogramDevice, 0, sizeof(int) * HISTOGRAM_LENGTH);
 
     // allocate memory for output
-    outputHost = (int*) malloc(sizeof(int) * HISTOGRAM_LENGTH);
+    outputHost = (float*) malloc(sizeof(float) * HISTOGRAM_LENGTH);
 
     // dim sizes
     dim3 blockDim;
@@ -174,9 +174,9 @@ int main() {
     // create CDF from histogram
     blockDim = dim3(HISTOGRAM_LENGTH / 2);
     gridDim = dim3(1, 1, 1);
-    CDF<<<gridDim, blockDim>>>(histogramDevice, CDFDevice);
+    CDF<<<gridDim, blockDim>>>(histogramDevice, CDFDevice, height, width);
     cudaDeviceSynchronize();
-    cudaMemcpy(outputHost, CDFDevice, sizeof(int) * HISTOGRAM_LENGTH, cudaMemcpyDeviceToHost);
+    cudaMemcpy(outputHost, CDFDevice, sizeof(float) * HISTOGRAM_LENGTH, cudaMemcpyDeviceToHost);
 
     // DO NOT COPY OVER: for testing purposes only
     for (int i = 0; i < height * width * channels; i++) 
