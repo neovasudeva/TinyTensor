@@ -126,8 +126,8 @@ __global__ void equalization(float* input, float* cdf, float* output, int height
 
 int main() {
     // init image
-    const int height = 900;
-    const int width = 900;
+    const int height = 9;
+    const int width = 9;
     const int channels = 3;
     float imageHost[height * width * channels];
 
