@@ -5,22 +5,6 @@
 #define BLOCK_SIZE 16
 #define HISTOGRAM_LENGTH 256
 
-/* kernel to convert to unsigned char */
-/*
-__global__ void ucharConvert(float* input, unsigned char* output, int height, int width, int channels) {
-    int row = threadIdx.y + BLOCK_SIZE * blockIdx.y;
-    int col = threadIdx.x + BLOCK_SIZE * blockIdx.x;
-
-    if (row < height && col < width) {
-        int rgbOffset = (row * width + col) * channels;
-        output[rgbOffset] = (unsigned char) (255 * input[rgbOffset]);
-        output[rgbOffset + 1] = (unsigned char) (255 * input[rgbOffset + 1]);
-        output[rgbOffset + 2] = (unsigned char) (255 * input[rgbOffset + 2]);
-    }
-
-}
-*/
-
 /* kernel to convert image to unsigned char format */
 __global__ void greyscale(float* input, unsigned char* output, int height, int width, int channels) {
     // shared memory
@@ -46,6 +30,19 @@ __global__ void greyscale(float* input, unsigned char* output, int height, int w
 
         // greyscale
         output[greyOffset] = (unsigned char) (0.21 * r + 0.71 * g + 0.07 * b);
+    }
+}
+
+/* trash kernel to generate histogram */
+__global__ void trash_histogram(unsigned char* image, int* output, int height, int width) {
+    // indices in image
+    int row = threadIdx.y + BLOCK_SIZE * blockIdx.y;
+    int col = threadIdx.x + BLOCK_SIZE * blockIdx.x;
+
+    // increment data to histogram
+    if (row < height && col < width) {
+        unsigned char pixel = image[row * width + col];
+        atomicAdd(&output[pixel], 1);
     }
 }
 
@@ -111,10 +108,26 @@ __global__ void CDF(int* histogram, float* output, int height, int width) {
     output[threadIdx.x + blockDim.x] = cdf[threadIdx.x + blockDim.x] / (width * height);
 }
 
+/* kernel to do equalization */
+__global__ void equalization(float* input, float* cdf, float* output, int height, int width) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+  
+    // do equalization
+    if (row < height && col < width) {
+        unsigned char val = (unsigned char) (255 * input[blockIdx.z * width * height + width * row + col]);
+    
+        float temp = 255 * (cdf[val] - cdf[0]) / (1.0 - cdf[0]);
+        float clamp = min(max(temp, 0.0), 255.0);
+    
+        output[blockIdx.z * width * height + width * row + col] = clamp / 255.0;
+    }
+}
+
 int main() {
     // init image
-    const int height = 3;
-    const int width = 3;
+    const int height = 900;
+    const int width = 900;
     const int channels = 3;
     float imageHost[height * width * channels];
 
@@ -124,59 +137,60 @@ int main() {
 
     // intermediate arrays
     float* imageDevice;
-    unsigned char* ucharImageDevice;
     unsigned char* greyscaleDevice;
     int* histogramDevice;
     float* CDFDevice;
+    float* outputDevice;
     float* outputHost;
 
     // space allocation for intermediate arrays
     cudaMalloc((void**) &imageDevice, sizeof(float) * height * width * channels); 
-    cudaMalloc((void**) &ucharImageDevice, sizeof(unsigned char) * height * width * channels);
     cudaMalloc((void**) &greyscaleDevice, sizeof(unsigned char) * height * width);
     cudaMalloc((void**) &histogramDevice, sizeof(int) * HISTOGRAM_LENGTH);
     cudaMalloc((void**) &CDFDevice, sizeof(float) * HISTOGRAM_LENGTH);
+
+    cudaMalloc((void**) &outputDevice, sizeof(float) * height * width * channels);
 
     // assign data 
     cudaMemcpy(imageDevice, imageHost, sizeof(float) * height * width * channels, cudaMemcpyHostToDevice);
     cudaMemset(histogramDevice, 0, sizeof(int) * HISTOGRAM_LENGTH);
 
     // allocate memory for output
-    outputHost = (float*) malloc(sizeof(float) * HISTOGRAM_LENGTH);
+    outputHost = (float*) malloc(sizeof(float) * height * width * channels);
 
     // dim sizes
     dim3 blockDim;
     dim3 gridDim;
-
-    // convert to unsigned characters
-    /*
-    blockDim = dim3(BLOCK_SIZE, BLOCK_SIZE, 1);
-    gridDim = dim3(ceil(((float)width) / BLOCK_SIZE), ceil(((float)height / BLOCK_SIZE)), 1);
-    ucharConvert<<<gridDim, blockDim>>>(imageDevice, ucharImageDevice, height, width, channels);
-    cudaDeviceSynchronize();
-    cudaMemcpy(outputHost, ucharImageDevice, sizeof(unsigned char) * height * width * channels, cudaMemcpyDeviceToHost);
-    */
 
     // greyscale the image
     blockDim = dim3(BLOCK_SIZE, BLOCK_SIZE, 1);
     gridDim = dim3(ceil(((float)width) / BLOCK_SIZE), ceil(((float)height / BLOCK_SIZE)), 1);
     greyscale<<<gridDim, blockDim>>>(imageDevice, greyscaleDevice, height, width, channels);
     cudaDeviceSynchronize();
-    //cudaMemcpy(outputHost, greyscaleDevice, sizeof(unsigned char) * height * width, cudaMemcpyDeviceToHost);
+    
+    // trash histogram creation for benchmarking
+    // blockDim = dim3(BLOCK_SIZE, BLOCK_SIZE, 1);
+    // gridDim = dim3(ceil(((float)width) / BLOCK_SIZE), ceil(((float)height / BLOCK_SIZE)), 1);
+    // trash_histogram<<<gridDim, blockDim>>>(greyscaleDevice, histogramDevice, height, width);
+    // cudaDeviceSynchronize();
 
     // create histogram
     blockDim = dim3(BLOCK_SIZE, BLOCK_SIZE, 1);
     gridDim = dim3(ceil(((float)width) / BLOCK_SIZE), ceil(((float)height / BLOCK_SIZE)), 1);
     histogram<<<gridDim, blockDim>>>(greyscaleDevice, histogramDevice, height, width);
     cudaDeviceSynchronize();
-    //cudaMemcpy(outputHost, histogramDevice, sizeof(int) * HISTOGRAM_LENGTH, cudaMemcpyDeviceToHost);
 
     // create CDF from histogram
     blockDim = dim3(HISTOGRAM_LENGTH / 2);
     gridDim = dim3(1, 1, 1);
     CDF<<<gridDim, blockDim>>>(histogramDevice, CDFDevice, height, width);
     cudaDeviceSynchronize();
-    cudaMemcpy(outputHost, CDFDevice, sizeof(float) * HISTOGRAM_LENGTH, cudaMemcpyDeviceToHost);
+
+    // equalize image from CDF
+    blockDim = dim3(BLOCK_SIZE, BLOCK_SIZE, 1);
+    gridDim = dim3(ceil(((float)width) / BLOCK_SIZE), ceil(((float)height / BLOCK_SIZE)), channels);
+    equalization<<<gridDim, blockDim>>>(imageDevice, CDFDevice, outputDevice, height, width);
+    cudaMemcpy(outputHost, outputDevice, sizeof(float) * height * width * channels, cudaMemcpyDeviceToHost);
 
     // DO NOT COPY OVER: for testing purposes only
     for (int i = 0; i < height * width * channels; i++) 
@@ -184,7 +198,18 @@ int main() {
     std::cout << std::endl;
     std::cout << std::endl;
 
-    for (int i = 0; i < HISTOGRAM_LENGTH; i++) 
+    for (int i = 0; i < height * width * channels; i++) 
         std::cout << outputHost[i] << " ";
     std::cout << std::endl;
+
+    // free memory on device and host
+    cudaFree(imageDevice);
+    cudaFree(greyscaleDevice);
+    cudaFree(histogramDevice);
+    cudaFree(CDFDevice);
+    cudaFree(outputDevice);
+    free(outputHost);
+
+    // success 
+    return 0;
 }
