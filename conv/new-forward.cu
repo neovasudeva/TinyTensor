@@ -5,7 +5,7 @@
 #include "gpu-new-forward.h"
 
 #define TILE_WIDTH  16
-#define GEMM_TILE_WIDTH 64
+#define GEMM_TILE_WIDTH 32
 
 
 __global__ void conv_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
@@ -170,15 +170,8 @@ __global__ void gemm(float* A, float* B, float* output, int A_rows, int A_cols, 
         output[row * B_cols + col] = pValue;
 }
 
-/* entry point for testing */
-int main(int argc, char** argv) {
-    /*
-    std::cout << "GPU DEVICE PROPERTIES" << std::endl;
-    GPUInterface i;
-    i.get_device_properties();
-    */
-
-    // GEMM KERNEL TEST
+/* gemm test function */
+void test_gemm(char** argv) {
     int N;
     int M;
     int P;
@@ -193,7 +186,6 @@ int main(int argc, char** argv) {
     float* deviceB;
     float* deviceOutput;
 
-    /*
     for (int i = 0; i < N * M; i++) {
         A[i] = rand() % 10;
         std::cout << A[i] << " ";
@@ -204,7 +196,6 @@ int main(int argc, char** argv) {
         std::cout << B[i] << " ";
     }
     std::cout << std::endl;
-    */
 
     cudaMalloc((void**) &deviceA, sizeof(float) * N * M);
     cudaMalloc((void**) &deviceB, sizeof(float) * M * P);
@@ -217,11 +208,9 @@ int main(int argc, char** argv) {
     gemm<<<gridDim, blockDim>>>(deviceA, deviceB, deviceOutput, N, M, M, P);
     cudaMemcpy(hostOutput, deviceOutput, sizeof(float) * N * P, cudaMemcpyDeviceToHost);
 
-    /*
     for (int i = 0; i < N * P; i++) 
         std::cout << hostOutput[i] << " ";
     std::cout << std::endl;
-    */
 
     // free memory
     delete [] A;
@@ -230,4 +219,15 @@ int main(int argc, char** argv) {
     cudaFree(deviceA);
     cudaFree(deviceB);
     cudaFree(deviceOutput);
+}
+
+/* entry point for testing */
+int main(int argc, char** argv) {
+    /*
+    std::cout << "GPU DEVICE PROPERTIES" << std::endl;
+    GPUInterface i;
+    i.get_device_properties();
+    */
+
+    test_gemm(argv);
 }
