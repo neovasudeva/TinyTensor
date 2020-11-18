@@ -6,6 +6,7 @@
 
 #define TILE_WIDTH  16
 #define GEMM_TILE_WIDTH 32
+#define CUDA_MAX_NUM_THREADS 1024
 
 
 __global__ void conv_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
@@ -131,6 +132,7 @@ __host__ void GPUInterface::get_device_properties()
     }
 }
 
+/* general matrix multiply kernel */
 __global__ void gemm(float* A, float* B, float* output, int A_rows, int A_cols, int B_rows, int B_cols) {
     // shared memory for both A and B matrices
     __shared__ float Ads[GEMM_TILE_WIDTH][GEMM_TILE_WIDTH];
@@ -221,13 +223,87 @@ void test_gemm(char** argv) {
     cudaFree(deviceOutput);
 }
 
+/* kernel for unrolling 
+ * TODO: optimize (maybe shared memory reading from input)
+*/
+__global__ void unroll(float* input, float* output, int C, int K, int H, int W) {
+    // variables used later
+    int t = blockIdx.x * CUDA_MAX_NUM_THREADS + threadIdx.x;
+    int H_out = H - K + 1;
+    int W_out = W - K + 1;
+    int W_unroll = H_out * W_out;
+    int c, s, h_out, w_out, h_unroll, w_base;
+
+    // verify thread is in bounds of K * K sections        
+    if (t < C * W_unroll) {
+        // get K * K square to operate on out of all C input feature maps
+        c = t / W_unroll;
+        s = t % W_unroll;
+        h_out = s / W_out;
+        w_out = s % W_out;
+
+        // unroll K * K square
+        h_unroll = h_out * W_out + w_out;
+        w_base = c * K * K * H_out * W_out;
+        for (int p = 0; p < K; p++) {
+            for (int q = 0; q < K; q++) {
+                output[w_base + (p * K + q) * H_out * W_out + s] = input[c * (H * W) + (h_out + p) * W + w_out + q];
+            }
+        }
+    }
+}
+
+/* test function for unrolling ONE image */
+void test_unroll() {
+    // init input image feature maps
+    const int C = 2;
+    const int K = 2;
+    const int H = 4;
+    const int W = 3;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    float hostInput[C * H * W] = {1, 3, 6, 2, 0, 3, 1, 0, 0, 3, 2, 7, 4, 2, 9, 3, 6, 2, 8, 2, 1, 1, 0, 3};
+    float* hostOutput = new float[C * K * K * H_out * W_out];
+    float* deviceInput;
+    float* deviceOutput;
+
+    // initialize device memory
+    cudaMalloc((void**) &deviceInput, sizeof(float) * C * H * W);
+    cudaMalloc((void**) &deviceOutput, sizeof(float) * C * (K * K) * W_out * H_out);
+    cudaMemcpy(deviceInput, hostInput, sizeof(float) * C * H * W, cudaMemcpyHostToDevice);
+
+    // initialize kernel
+    dim3 gridDim(ceil((C * H_out * W_out * 1.0) / CUDA_MAX_NUM_THREADS), 1, 1);
+    dim3 blockDim(CUDA_MAX_NUM_THREADS, 1, 1);
+    unroll<<<gridDim, blockDim>>>(deviceInput, deviceOutput, C, K, H, W);
+    cudaMemcpy(hostOutput, deviceOutput, sizeof(float) * C * H_out * W_out * K * K, cudaMemcpyDeviceToHost);
+
+    // check for errors
+    cudaError_t error = cudaGetLastError();
+    if(error != cudaSuccess) {
+        std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
+        exit(-1);
+    }
+
+    // check output
+    for (int i = 0; i < C * K * K * H_out * W_out; i++) 
+        std::cout << hostOutput[i] << " ";
+    std::cout << std::endl;
+
+    // free memory
+    delete [] hostOutput;
+    cudaFree(deviceInput);
+    cudaFree(deviceOutput);
+}
+
 /* entry point for testing */
 int main(int argc, char** argv) {
+    // GPU device properties
     /*
-    std::cout << "GPU DEVICE PROPERTIES" << std::endl;
     GPUInterface i;
     i.get_device_properties();
     */
 
-    test_gemm(argv);
+    //test_gemm(argv);
+    test_unroll();
 }
