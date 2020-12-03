@@ -7,119 +7,17 @@
 #define TILE_WIDTH  16
 #define GEMM_TILE_WIDTH 32
 #define CUDA_MAX_NUM_THREADS 1024
-
-
-__global__ void conv_forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
-{
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-
-    Function paramter definitions:
-    y - output
-    x - input
-    k - kernel
-    B - batch_size (number of images in x)
-    M - number of output feature maps
-    C - number of input feature maps
-    H - input height dimension
-    W - input width dimension
-    K - kernel height and width (K x K)
-    */
-
-    const int H_out = H - K + 1;
-    const int W_out = W - K + 1;
-    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
-    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
-
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = y4d(0,0,0,0)
-    // y4d(0,0,0,0) = a
-
-#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-
-    // Insert your GPU convolution kernel code here
-    const int m = blockIdx.z;
-    const int h = blockIdx.y*TILE_WIDTH + threadIdx.y;
-    const int w = blockIdx.x*TILE_WIDTH + threadIdx.x;
-
-    if (h >= H_out || w >= W_out) return;
-
-    for (int b = 0; b < B; b++) {
-        float Pvalue = 0.0;
-        for (int c = 0; c < C; c++) {
-            for (int p = 0; p < K; p++) {
-                for (int q = 0; q < K; q++) {
-                    Pvalue += x4d(b, c, h+p, w+q) * k4d(m, c, p, q);
-                }
-            }
-        }
-        y4d(b, m, h, w) = Pvalue;
-    }
-
-#undef y4d
-#undef x4d
-#undef k4d
-}
-
-__host__ void GPUInterface::conv_forward_gpu(float *host_y, const float *host_x, const float *host_k, const int B, const int M, const int C, const int H, const int W, const int K)
-{
-    const int H_out = H - K + 1;
-    const int W_out = W - K + 1;
-
-    const int input_size = B*C*H*W;
-    const int kernel_size = M*C*K*K;
-    const int output_size = B*M*H_out*W_out;
     
-    // Declare relevant device pointers
-    float* device_x;
-    float* device_k;
-    float* device_y;
-
-    // Allocate memory and copy over the relevant data structures to the GPU
-    cudaMalloc((void**)&device_x, input_size*sizeof(float));
-    cudaMalloc((void**)&device_k, kernel_size*sizeof(float));
-    cudaMalloc((void**)&device_y, output_size*sizeof(float));
-
-    cudaMemcpy(device_x, host_x, input_size*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(device_k, host_k, kernel_size*sizeof(float), cudaMemcpyHostToDevice);
-
-    // Set the kernel dimensions and call the kernel
-    dim3 DimGrid(ceil(1.0*W_out/TILE_WIDTH), ceil(1.0*H_out/TILE_WIDTH), M);
-    dim3 DimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-    conv_forward_kernel<<<DimGrid, DimBlock>>>(device_y, device_x, device_k, B, M, C, H, W, K);
-
-    // Copy the output back to host
-    cudaMemcpy(host_y, device_y, output_size*sizeof(float), cudaMemcpyDeviceToHost);
-
-    // Free device memory
-    cudaFree(device_x);
-    cudaFree(device_k);
-    cudaFree(device_y);
-
-    // Useful snippet for error checking
-    // cudaError_t error = cudaGetLastError();
-    // if(error != cudaSuccess)
-    // {
-    //     std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
-    //     exit(-1);
-    // }
-}
-
 __host__ void GPUInterface::get_device_properties()
 {
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
-
+    
     for(int dev = 0; dev < deviceCount; dev++)
     {
         cudaDeviceProp deviceProp;
         cudaGetDeviceProperties(&deviceProp, dev);
-
+        
         std::cout<<"Device "<<dev<<" name: "<<deviceProp.name<<std::endl;
         std::cout<<"Computational capabilities: "<<deviceProp.major<<"."<<deviceProp.minor<<std::endl;
         std::cout<<"Max Global memory size: "<<deviceProp.totalGlobalMem<<std::endl;
@@ -132,12 +30,17 @@ __host__ void GPUInterface::get_device_properties()
     }
 }
 
+/* helper function to find the nearest power of two greater than num */
+int p2up(int num) {
+    return pow(2, (int) (log(num) / log(2)) + 1);
+}
+
 /* general matrix multiply kernel */
 __global__ void gemm(float* A, float* B, float* output, int A_rows, int A_cols, int B_rows, int B_cols) {
     // shared memory for both A and B matrices
     __shared__ float Ads[GEMM_TILE_WIDTH][GEMM_TILE_WIDTH];
     __shared__ float Bds[GEMM_TILE_WIDTH][GEMM_TILE_WIDTH];
-  
+    
     // variables for easy reference
     int tx = threadIdx.x; 
     int ty = threadIdx.y;
@@ -163,8 +66,6 @@ __global__ void gemm(float* A, float* B, float* output, int A_rows, int A_cols, 
         __syncthreads();
         for (int k = 0; k < GEMM_TILE_WIDTH; k++) 
             pValue += Ads[ty][k] * Bds[k][tx];
-
-        __syncthreads();
     }
 
     // load values to output
@@ -190,14 +91,16 @@ void test_gemm(char** argv) {
 
     for (int i = 0; i < N * M; i++) {
         A[i] = rand() % 10;
-        std::cout << A[i] << " ";
+        //std::cout << A[i] << " ";
     }
-    std::cout << std::endl;
+    //std::cout << std::endl;
     for (int i = 0; i < M * P; i++) {
         B[i] = rand() % 10;
-        std::cout << B[i] << " ";
+        //std::cout << B[i] << " ";
     }
-    std::cout << std::endl;
+    //std::cout << std::endl;
+
+    //cudaMemcpyToSymbol(weight_matrix, B, M * P *sizeof(float));
 
     cudaMalloc((void**) &deviceA, sizeof(float) * N * M);
     cudaMalloc((void**) &deviceB, sizeof(float) * M * P);
@@ -208,11 +111,21 @@ void test_gemm(char** argv) {
     dim3 gridDim(ceil(1.0 * P / GEMM_TILE_WIDTH), ceil(1.0 * N / GEMM_TILE_WIDTH), 1);
     dim3 blockDim(GEMM_TILE_WIDTH, GEMM_TILE_WIDTH, 1);
     gemm<<<gridDim, blockDim>>>(deviceA, deviceB, deviceOutput, N, M, M, P);
+    cudaDeviceSynchronize(); 
     cudaMemcpy(hostOutput, deviceOutput, sizeof(float) * N * P, cudaMemcpyDeviceToHost);
 
+    // check for errors
+    cudaError_t error = cudaGetLastError();
+    if(error != cudaSuccess) {
+        std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
+        exit(-1);
+    }
+
+    /*
     for (int i = 0; i < N * P; i++) 
         std::cout << hostOutput[i] << " ";
     std::cout << std::endl;
+    */
 
     // free memory
     delete [] A;
@@ -232,7 +145,7 @@ __global__ void unroll(float* input, float* output, int C, int K, int H, int W) 
     int H_out = H - K + 1;
     int W_out = W - K + 1;
     int W_unroll = H_out * W_out;
-    int c, s, h_out, w_out, h_unroll, w_base;
+    int c, s, h_out, w_out, w_base;
 
     // verify thread is in bounds of K * K sections        
     if (t < C * W_unroll) {
@@ -243,7 +156,6 @@ __global__ void unroll(float* input, float* output, int C, int K, int H, int W) 
         w_out = s % W_out;
 
         // unroll K * K square
-        h_unroll = h_out * W_out + w_out;
         w_base = c * K * K * H_out * W_out;
         for (int p = 0; p < K; p++) {
             for (int q = 0; q < K; q++) {
@@ -276,6 +188,7 @@ void test_unroll() {
     dim3 gridDim(ceil((C * H_out * W_out * 1.0) / CUDA_MAX_NUM_THREADS), 1, 1);
     dim3 blockDim(CUDA_MAX_NUM_THREADS, 1, 1);
     unroll<<<gridDim, blockDim>>>(deviceInput, deviceOutput, C, K, H, W);
+    cudaDeviceSynchronize();
     cudaMemcpy(hostOutput, deviceOutput, sizeof(float) * C * H_out * W_out * K * K, cudaMemcpyDeviceToHost);
 
     // check for errors
@@ -286,9 +199,152 @@ void test_unroll() {
     }
 
     // check output
+    /*
     for (int i = 0; i < C * K * K * H_out * W_out; i++) 
         std::cout << hostOutput[i] << " ";
     std::cout << std::endl;
+    */
+
+    // free memory
+    delete [] hostOutput;
+    cudaFree(deviceInput);
+    cudaFree(deviceOutput);
+}
+
+/* 
+ * improved unrolling with shared memory and fused with GEMM
+ * each block finds entire column in unrolled matrix and each thread loads one element from KxK block C times
+ * then does GEMM via a reduction tree
+ * weight matrix is in constant memory
+ * 
+ * blockIdx.x = which KxK block in a given input feature map is taken by these threads, gets whole column in unrolled matrix
+ * threadIdx.x = takes an element in the KxK block and stores in shared memory
+ * uses dynamic shared memory 
+*/
+// constant memory for weights in matrix multiplication
+__constant__ float weight[5000];
+
+__global__ void unroll_gemm(float* input, float* output, int M, int C, int K, int H, int W) {
+    // constants 
+    int H_out = H - K + 1;
+    int W_out = W - K + 1;
+    int t = threadIdx.x;
+    int b = blockIdx.x;
+    int batch = blockIdx.y;
+    int c, s, h_out, w_out, h_base, w_base;
+    
+    // shared memory = one column in unrolled matrix
+    // SIZE PER THREAD BLOCK IN BYTES MUST BE SPECIFIED IN KERNEL LAUNCH PARAMETERS
+    // size should be C * K * K
+    extern __shared__ float dyn_shared[];
+    float* unrolled = (float*) dyn_shared;
+    float* gemm = (float*) &unrolled[K * K * C]; // nearest power of 2 larger than C * K * K
+
+    // UNROLLING
+    if (t < K * K * C) {
+        // find feature map to get the K*K block from 
+        c = t / (K * K);    
+        s = t % (K * K);
+        h_out = s / K;
+        w_out = s % K;
+        h_base = b / W_out;
+        w_base = b % W_out;
+
+        // copy data to shared memory
+        unrolled[t] = input[batch * (C * H * W) + c * (H * W) + (h_base * W + w_base) + h_out * W + w_out];
+    }
+
+    // GEMM via list reduction
+    // each block will go find M elements in output (1 col)
+    int p2down = (int) powf(2, (int) (logf(C * K * K) / logf(2)));
+    int p2up = (int) powf(2, (int) (logf(C * K * K) / logf(2)) + 1);
+    for (int m = 0; m < M; m++) {
+        // store multplication results in gemm shared memory
+        gemm[t] = unrolled[t] * weight[m * (K * K * C) + t];
+        if (blockDim.x + t < p2up)
+            gemm[blockDim.x + t] = 0;
+
+        // perform list reduction gemm (half of threads)
+        for (int stride = p2down; stride >= 1; stride /= 2) { 
+            __syncthreads(); 
+            if (t < stride) 
+                gemm[t] += gemm[t + stride];
+        }
+
+        // write output
+        if (t == 0) 
+            output[batch * (M * H_out * W_out) + m * (H_out * W_out) + b] = gemm[0];
+    }
+}
+
+void test_unroll_gemm() {
+    const int B = 2;
+    const int C = 3;
+    const int M = 2;
+    const int K = 2;
+    const int H = 3;
+    const int W = 3;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    float hostInput[B * C * H * W] = {1, 2, 0, 1, 1, 3, 0, 2, 2, 
+                                  0, 2, 1, 0, 3, 2, 1, 1, 0, 
+                                  1, 2, 1, 0, 1, 3, 3, 3, 2,
+
+                                  2, 1, 3, 0, 3, 1, 2, 0, 3,
+                                  1, 2, 2, 3, 2, 1, 1, 0, 0, 
+                                  1, 3, 2, 0, 0, 2, 3, 1, 1};
+    float hostWeight[K * K * M * C] = {1, 1, 2, 2,
+                                       1, 1, 1, 1,
+                                       0, 1, 1, 0,
+                                       1, 0, 0, 1, 
+                                       2, 1, 2, 1,
+                                       1, 2, 2, 0};
+    float* hostOutput = new float[B * M * H_out * W_out];
+    //float* hostTemp = new float[C * K * K * H_out * W_out];
+    float* deviceInput;
+    float* deviceOutput;
+    //float* deviceTemp;
+
+    // initialize device memory
+    cudaMalloc((void**) &deviceInput, sizeof(float) * B * C * H * W);
+    cudaMalloc((void**) &deviceOutput, sizeof(float) * B * M * W_out * H_out);
+    //cudaMalloc((void**) &deviceTemp, sizeof(float) * C * K * K * H_out * W_out);
+    cudaMemcpy(deviceInput, hostInput, sizeof(float) * B * C * H * W, cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(weight, hostWeight, sizeof(float) * K * K * M * C);
+
+    // initialize kernel
+    dim3 gridDim(H_out * W_out, B, 1);
+    dim3 blockDim(C * K * K, 1, 1);
+    int sharedMem = sizeof(float) * C * K * K + sizeof(float) * p2up(C * K * K);
+    unroll_gemm<<<gridDim, blockDim, sharedMem>>>(deviceInput, deviceOutput, M, C, K, H, W);
+    cudaDeviceSynchronize();
+    //cudaMemcpy(hostTemp, deviceTemp, sizeof(float) * C * K * K * H_out * W_out, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hostOutput, deviceOutput, sizeof(float) * B * M * H_out * W_out, cudaMemcpyDeviceToHost);
+
+    // check for errors
+    cudaError_t error = cudaGetLastError();
+    if(error != cudaSuccess) {
+        std::cout<<"CUDA error: "<<cudaGetErrorString(error)<<std::endl;
+        exit(-1);
+    }
+
+    // check unrolling
+    /*
+    for (int i = 0; i < C * K * K; i++) {
+        for (int j = 0; j < H_out * W_out; j++) {
+            std::cout << hostTemp[i * H_out * W_out + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+    */
+
+    // check output
+    for (int i = 0; i < B * M; i++) {
+        for (int j = 0; j < H_out * W_out; j++)
+            std::cout << hostOutput[i * H_out * W_out + j] << " ";
+        std::cout << std::endl;
+    }
 
     // free memory
     delete [] hostOutput;
@@ -299,11 +355,15 @@ void test_unroll() {
 /* entry point for testing */
 int main(int argc, char** argv) {
     // GPU device properties
-    /*
     GPUInterface i;
     i.get_device_properties();
+
+    /* Kernel sizes to consider:
+        B: 100, M: 4, C: 1, K: 7, H: 86, W: 86
+        B: 100, M: 16, C: 4, K: 7, H: 40, W: 40
     */
 
     //test_gemm(argv);
-    test_unroll();
+    //test_unroll();
+    test_unroll_gemm();
 }
